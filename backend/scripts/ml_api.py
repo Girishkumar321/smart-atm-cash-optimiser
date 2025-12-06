@@ -7,7 +7,7 @@ from flask import Blueprint, request, jsonify
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-import joblib
+import pickle
 import os
 import sys
 
@@ -40,59 +40,20 @@ def load_model_for_atm(atm_id: int, model_type: str = 'ensemble'):
         return None
     
     try:
-        # Load using joblib and wrap in forecaster class
-        if model_type == 'arima':
-            forecaster = ARIMAForecaster()
-            forecaster.fitted_model = joblib.load(model_path)
-            forecaster.model = None  # Not needed for prediction
-            forecaster.is_trained = True  # Mark as trained
-        elif model_type == 'lstm':
-            # Load LSTM package (contains model, scaler, and config)
-            lstm_package = joblib.load(model_path)
-            forecaster = LSTMForecaster(
-                lookback=lstm_package.get('lookback', 30),
-                units=lstm_package.get('units', 50)
-            )
-            forecaster.model = lstm_package['model']
-            forecaster.scaler = lstm_package['scaler']
-            forecaster.is_trained = True  # Mark as trained
-        elif model_type == 'ensemble':
-            # Load ensemble info
-            ensemble_info = joblib.load(model_path)
-            print(f"Loading ensemble with models: {ensemble_info.get('model_names', [])}")
-            
-            # Create ensemble with available models
-            models_list = []
-            model_names = ensemble_info.get('model_names', [])
-            
-            if 'ARIMA' in model_names or 'arima' in model_names:
-                print("  Loading ARIMA for ensemble...")
-                arima = load_model_for_atm(atm_id, 'arima')
-                if arima:
-                    print(f"  ✓ ARIMA loaded, is_trained={arima.is_trained}")
-                    models_list.append(arima)
-                else:
-                    print("  ✗ ARIMA failed to load")
-                    
-            if 'LSTM' in model_names or 'lstm' in model_names:
-                print("  Loading LSTM for ensemble...")
-                lstm = load_model_for_atm(atm_id, 'lstm')
-                if lstm:
-                    print(f"  ✓ LSTM loaded, is_trained={lstm.is_trained}")
-                    models_list.append(lstm)
-                else:
-                    print("  ✗ LSTM failed to load")
-            
-            if models_list:
-                print(f"  Creating ensemble with {len(models_list)} models")
-                forecaster = EnsembleForecaster(models_list)
-                forecaster.is_trained = True  # Mark ensemble as trained
-            else:
-                print("  ✗ No models loaded for ensemble")
-                return None
-        else:
+        # Load using pickle (models saved by train_ml_models_quick.py)
+        with open(model_path, 'rb') as f:
+            forecaster = pickle.load(f)
+        
+        # Verify the model object was loaded
+        if forecaster is None:
+            print(f"✗ Model file loaded but object is None: {model_path}")
             return None
         
+        # Mark as trained if not already marked
+        if not hasattr(forecaster, 'is_trained'):
+            forecaster.is_trained = True
+        
+        print(f"✓ Successfully loaded {model_type} model for ATM {atm_id}")
         loaded_models[model_key] = forecaster
         return forecaster
     except Exception as e:
@@ -294,12 +255,19 @@ def get_model_metrics(atm_id):
         }), 404
     
     try:
-        # Read CSV - first column is metric names (MAE, RMSE, etc.), other columns are models
-        metrics_df = pd.read_csv(metrics_file, index_col=0)
+        # Read CSV - first column is "Model", then MAE, RMSE, MAPE, R2
+        metrics_df = pd.read_csv(metrics_file)
         
-        # Transpose to get models as rows and metrics as columns
-        metrics_df_t = metrics_df.T
-        metrics_dict = metrics_df_t.to_dict('index')
+        # Convert to dict with Model as key
+        metrics_dict = {}
+        for _, row in metrics_df.iterrows():
+            model_name = row['Model']
+            metrics_dict[model_name] = {
+                'MAE': row['MAE'],
+                'RMSE': row['RMSE'],
+                'MAPE': row['MAPE'],
+                'R2': row['R2']
+            }
         
         # Find best model (lowest MAPE)
         best_model = None
